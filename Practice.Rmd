@@ -1,0 +1,200 @@
+---
+title: "Practice"
+author: "Sara Szabo"
+date: "2022-11-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# install.packages('tidymodels')
+# install.packages('readr')
+# install.packages('broom.mixed')
+# install.packages('dotwhisker')
+install.packages('rstanarm')
+
+library(tidymodels)
+library(readr)
+library(broom.mixed)
+library(dotwhisker)
+library(tidyverse)
+library(rstanarm)
+```
+
+```{r}
+urchins <- readr::read_csv("https://tidymodels.org/start/models/urchins.csv") %>% 
+  setNames(c('food_regime', 'initial_volume', 'width')) %>%
+  mutate(food_regime = factor(x = food_regime, levels = c('Initial', 'Low', 'High')))
+
+head(urchins)
+
+#?factor()
+  
+```
+
+```{r}
+ggplot(urchins,
+       aes(x = initial_volume,
+           y = width,
+           group = food_regime,
+           col = food_regime)) +
+  geom_point() +
+  geom_smooth(method = lm, se = FALSE) +
+  scale_color_viridis_d(option = 'plasma', end = .7)
+  
+```
+
+```{r}
+#defining formula
+width ~ initial_volume * food_regime
+
+linear_reg()
+```
+
+```{r}
+linear_reg() %>% 
+  set_engine('keras')
+```
+
+```{r}
+lm_mod <- linear_reg()
+```
+
+from here the model can be estimated or trained using the _fit()_ function
+
+```{r}
+lm_fit <- 
+  lm_mod %>% 
+  fit(width ~ initial_volume * food_regime, data = urchins)
+
+lm_fit
+```
+```{r}
+tidy(lm_fit)
+```
+Generating a dot and whisker plot from the data
+
+```{r}
+tidy(lm_fit) %>% 
+  dwplot(dot_args = list(size = 2, color = 'black'),
+         whisker_args = list(color = 'black'),
+         vline = geom_vline(xintercept = 0, colour = 'grey50', linetype = 
+                              2))
+```
+
+lm_fit has the lm model output built in, can be accessed with lm_fit$fit
+
+```{r}
+new_points <- expand.grid(initial_volume = 20,
+                          food_regime = c('Initial', 'Low', 'High'))
+
+new_points
+```
+to get predicted results: predict() function to find the mean values at 20 ml
+
+It is also important to communicate the variability, so we also need to find the predicted confidence intervals. If we had used lm() to fit the model directly, a few minutes of reading the documentation page for predict.lm() would explain how to do this. However, if we decide to use a different model to estimate urchin size (spoiler: we will!), it is likely that a completely different syntax would be required.
+
+Instead, with tidymodels, the types of predicted values are standardized so that we can use the same syntax to get these values.
+
+Generating body width values:
+
+```{r}
+mean_pred <- predict(lm_fit, new_data = new_points)
+
+mean_pred
+```
+When making predictions, the tidymodels convention is to always produce a tibble of results with standardized column names. This makes it easy to combine the original data and the predictions in a usable format:
+
+```{r}
+conf_int_pred <- predict(lm_fit,
+                         new_data = new_points,
+                         type = 'conf_int')
+
+conf_int_pred
+
+#now combine
+plot_data <- 
+  new_points %>% 
+  bind_cols(mean_pred) %>% 
+  bind_cols(conf_int_pred)
+
+#and plot
+ggplot(plot_data, aes(x = food_regime)) + 
+  geom_point(aes(y = .pred)) +
+  geom_errorbar(aes(ymin = .pred_lower,
+                    ymax = .pred_upper),
+                width = .2) +
+  labs(y = 'urchin size')
+```
+#Model with a different engine - enter Bayes
+
+In such an analysis, a prior distribution needs to be declared for each model parameter that represents the possible values of the parameters (before being exposed to the observed data).
+
+the priors should be bell-shaped but, since no one has any idea what the range of values should be, to take a conservative approach and make the priors wide using a Cauchy distribution (which is the same as a t-distribution with a single degree of freedom).
+
+The documentation on the rstanarm package shows us that the stan_glm() function can be used to estimate this model, and that the function arguments that need to be specified are called prior and prior_intercept. It turns out that linear_reg() has a stan engine. Since these prior distribution arguments are specific to the Stan software, they are passed as arguments to parsnip::set_engine(). After that, the same exact fit() call is used:
+
+```{r}
+#set the prior distribution
+prior_dist <- rstanarm::student_t(df = 1)
+
+set.seed(123)
+
+#make the parsnip model
+bayes_mod <- 
+  linear_reg() %>% 
+  set_engine('stan',
+             prior_intercept = prior_dist,
+             prior = prior_dist)
+
+#train the model
+bayes_fit <- 
+  bayes_mod %>% 
+  fit(width ~ initial_volume * food_regime, data = urchins)
+
+print(bayes_fit, digits = 5)
+```
+This kind of Bayesian analysis (like many models) involves randomly generated numbers in its fitting procedure. We can use set.seed() to ensure that the same (pseudo-)random numbers are generated each time we run this code. The number 123 isn’t special or related to our data; it is just a “seed” used to choose random numbers.
+
+```{r}
+tidy(bayes_fit, conf.int = TRUE)
+```
+
+A goal of the tidymodels packages is that the interfaces to common tasks are standardized (as seen in the tidy() results above). The same is true for getting predictions; we can use the same code even though the underlying packages use very different syntax:
+
+```{r}
+bayes_plot_data <- 
+  new_points %>% 
+  bind_cols(predict(bayes_fit, new_data = new_points)) %>% 
+  bind_cols(predict(bayes_fit, new_data = new_points, type = 'conf_int'))
+
+ggplot(bayes_plot_data, aes(x = food_regime)) +
+  geom_point(aes(y = .pred)) +
+  geom_errorbar(aes(ymin = .pred_lower, ymax = .pred_upper), width = .2) +
+  labs(y = 'urchin_size') + 
+  ggtitle('Bayesian mode with t(1) prior distribution')
+```
+
+This isn’t very different from the non-Bayesian results (except in interpretation).
+###just for demonstrating pipes
+```{r}
+urchins %>% 
+  group_by(food_regime) %>% 
+  summarize(med_vol = median(initial_volume))
+
+bayes_mod %>% 
+  fit(width ~ initial_volume * food_regime, data = urchins)
+```
+
+```{r}
+ggplot(urchins,
+       aes(initial_volume, width)) +
+  geom_jitter()+
+  geom_smooth(method = lm, se = FALSE) +
+  labs(x = 'Volume', y = 'Width')
+```
+
